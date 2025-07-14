@@ -95,3 +95,107 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import zipfile
+import os
+import json
+import gzip
+import joblib
+
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+)
+
+def load_and_clean_data(zip_path):
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall("/mnt/data/temp")
+        csv_name = zip_ref.namelist()[0]
+        df = pd.read_csv(f"/mnt/data/temp/{csv_name}")
+
+    # Limpieza
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns=["ID"], errors="ignore")
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+    df = df.dropna()
+    return df
+
+def compute_metrics(model, X, y, dataset_name):
+    y_pred = model.predict(X)
+    return {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": precision_score(y, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y, y_pred),
+        "recall": recall_score(y, y_pred),
+        "f1_score": f1_score(y, y_pred)
+    }
+
+def compute_conf_matrix(model, X, y, dataset_name):
+    y_pred = model.predict(X)
+    cm = confusion_matrix(y, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_name,
+        "true_0": {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
+        "true_1": {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])}
+    }
+
+def main():
+    # === Paso 1: Cargar y limpiar datos ===
+    df_train = load_and_clean_data("files/input/train_data.csv.zip")
+    df_test = load_and_clean_data("files/input/test_data.csv.zip")
+
+    # === Paso 2: Separar X y y ===
+    x_train = df_train.drop(columns=["default"])
+    y_train = df_train["default"]
+    x_test = df_test.drop(columns=["default"])
+    y_test = df_test["default"]
+
+    # === Paso 3: Construir pipeline ===
+    cat_features = ["SEX", "EDUCATION", "MARRIAGE"]
+    num_features = [col for col in x_train.columns if col not in cat_features]
+
+    preprocessor = ColumnTransformer(transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features),
+        ("num", MinMaxScaler(), num_features)
+    ])
+
+    pipeline = Pipeline(steps=[
+        ("preprocessing", preprocessor),
+        ("feature_selection", SelectKBest(score_func=f_classif, k=25)),
+        ("classifier", LogisticRegression(C=1, max_iter=1000))
+    ])
+
+    # === Paso 4: Entrenar modelo ===
+    pipeline.fit(x_train, y_train)
+
+    # === Paso 5: Guardar modelo ===
+    os.makedirs("files/models", exist_ok=True)
+    with gzip.open("files/models/model.pkl.gz", "wb") as f:
+        joblib.dump(pipeline, f)
+
+    # === Paso 6 y 7: Calcular métricas y guardar ===
+    os.makedirs("files/output", exist_ok=True)
+    results = [
+        compute_metrics(pipeline, x_train, y_train, "train"),
+        compute_metrics(pipeline, x_test, y_test, "test"),
+        compute_conf_matrix(pipeline, x_train, y_train, "train"),
+        compute_conf_matrix(pipeline, x_test, y_test, "test"),
+    ]
+
+    with open("files/output/metrics.json", "w") as f:
+        for r in results:
+            f.write(json.dumps(r) + "\n")
+
+if __name__ == "__main__":
+    main()
